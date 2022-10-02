@@ -1,0 +1,572 @@
+<!-- Window configuration -->
+<div id="filter_window" class="container" style="display:none">
+    <div id="filter"></div>
+</div>
+<!--Main Body-->
+<div id="tilelayout"></div>
+
+<!--TileLayout Scripts-->
+<script id="grid-template" type="text/x-kendo-template">
+  <div id="grid" style="font-size: small;"></div>
+</script>
+
+<!--JavaScript-->
+<script>
+    // 1. filter_groups will be sent from the server 
+    // 2. This 'filters' variable is used in initializing the filter widget
+    // 3. We need to use this incase we want to filter when the page is loaded 
+    let filters = [
+        {{#each filter_groups}} // filter_groups is mentioned in the viewController
+            {
+                field: `{{field}}`,
+                operator: `{{operator}}`,
+                value: `{{value}}`,
+            },
+        {{/each}}
+    ];
+
+    $("#tilelayout").kendoTileLayout({
+        containers: [
+            {
+                colSpan: 1,
+                rowSpan: 1,
+                header: { text: `Expense Lists` },
+                bodyTemplate:
+                    kendo.template($("#grid-template").html())
+            },
+        ],
+        columns: 1,
+        columnsWidth: '100%',
+        rowsHeight: 'auto',
+        reorderable: false,
+        resizable: false
+    });
+
+    $(document).ready(function () {
+        // 1. Make sure the grid is loaded first and 
+        // 2. autoBind configuration is set to false,
+        //      this is because: if autoBind is true, then the dataSource will run 
+        //      read operation as soon as the grid is initialized and parameterMap
+        //      function will parse the filter but we have not initialized the filter yet.
+        expenseGrid();
+        // 1. After the grid initialization function is called, then call the createFilter
+        //      function to initialize.
+        createFilter();
+    });
+
+    function expenseGrid() {
+        let model = {
+            id: "_id",
+            fields: {
+                _id: { editable: false, nullable: true },
+                property: {
+                    type: 'object',
+                    defaultValue: {
+                        _id: null,
+                        property_name: null
+                    }
+                },
+                unit: {
+                    type: 'object',
+                    defaultValue: {
+                        _id: null,
+                        unit_name: null
+                    }
+                },
+                tenant: {
+                    type: 'object',
+                    defaultValue: {
+                        _id: null,
+                        tenant_name: null
+                    }
+                },
+                ledger: {
+                    type: 'object',
+                    defaultValue: {
+                        _id: null,
+                        ledger_name: null
+                    }
+                },
+                transaction_date: { type: 'date', validation: { required: true } },
+                transaction_amount: { type: 'number', validation: { required: true } },
+                transaction_number: { type: 'string' },
+                isActive: { type: "boolean", defaultValue: true },
+            }
+        };
+
+        let column = [
+            { field: "transaction_date", title: 'Expense Date', width: "200px", format: "{0:yyyy-MM-dd}", footerTemplate: "Total" },
+            { field: "transaction_number", title: 'Expense Number', width: "200px", footerTemplate: " Count: #=kendo.toString(count)#", footerAttributes: { 'class': 'text-center' }, hideMe: true },
+            { field: "tenant.tenant_name", title: 'Tenant Name', width: "200px", editor: tenantNameEditor },
+            { field: "property.property_name", title: 'Property Name', width: "200px", hideMe: true },
+            { field: "unit.unit_name", title: 'Unit Name', width: "200px", hideMe: true },
+            { field: "ledger.ledger_name", title: 'Expense Ledger', width: "200px", editor: ledgerNameEditor },
+            { field: "transaction_amount", title: 'Expense Amount', width: "200px", format: '{0:n}', attributes: { "class": "text-right" }, footerTemplate: " #=kendo.toString(sum,'n')#", footerAttributes: { 'class': 'text-right' } },
+            {
+                command:
+                    [
+                        { name: "edit", text: { edit: " ", update: "Update", cancel: "Cancel" } },
+                        { name: "destroy", text: " " }
+                    ], title: "Options", width: "120px"
+            }
+        ];
+
+        let dataSource = new kendo.data.DataSource({
+            // Use 'dataType' config if data is to be retrived/filtered 
+            // from the server. 
+            dataType: "json",
+            serverPaging: true,
+            serverFiltering: true,
+            transport: {
+                read: {
+                    url: "/api/expense/query/get",
+                    type: 'POST',
+                    complete: function (e) {
+                        // 1. The following kendoPopUpNotifications is defined in kendo layouts file
+                        // 2. The following function is run when the grid loads data from the server.
+                        //      This is just to notify the user that data is loaded, otherwise user might 
+                        //      not understand whether data is loaded or it is still loading data.
+                        // 3. The following function is used specially for grids with seperate filter function.
+                        kendoPopUpNotifications('success', 'Data fetching complete');
+                    }
+                },
+                update: {
+                    url: "/api/expense/update",
+                    type: "POST",
+                },
+                destroy: {
+                    url: "/api/expense/delete",
+                    type: "POST",
+                },
+                create: {
+                    url: "/api/expense/create",
+                    type: "POST",
+                },
+                parameterMap: function (options, operation) {
+                    // 1. Since data is loaded from the server each time a request is made,
+                    //      and we pagination & filter from server is enabled, hence we need to
+                    //      send the page number and page size to the server. Otherwise server will
+                    //      not know how many items does the user want to see in the grid and for which
+                    //      page the user is requesting the data.
+                    let pageSize = dataSource.pageSize(),
+                        page = dataSource.page();
+                    if (operation === "read") {
+                        return {
+                            models: kendo.stringify(parseFilter()), // Filtered query is defined here.
+                            skip: (page - 1) * (pageSize ? pageSize : 0), // Page number is defined here
+                            limit: (pageSize ? pageSize : 0) // Number of items per page is defined
+                        };
+                    }
+                    if (operation !== "read" && options.models) {
+                        return { models: kendo.stringify(options.models) };
+                    }
+                },
+            },
+            // In the filter window when the user selects filters and clicks
+            //      on the 'Apply' button, the Filter window should be closed. However,
+            //      there isn't any event available in the filter component to detect if
+            //      the user has clicked on the 'Apply' button or not. 
+            //  To address this issue, we used following 'requestStart' event of dataSource
+            //      component to detect if the dataSource is performing any read operation. 
+            //      If any read operation is run, then close the window automatically. 
+            requestStart: function (e) {
+                // The following command gets filter window. If the filter window is not
+                //      open then the 'wnd' variable will return undefined.
+                const wnd = $("#filter_window").data("kendoWindow");
+                // The following if condition checks if 'wnd' exists and 
+                //      the window is not hidden
+                if (wnd && !wnd.element.is(":hidden")) {
+                    // If wnd variable exists and window is not hidden, then
+                    //      close the window.
+                    wnd.close();
+                }
+            },
+            batch: true,
+            pageSize: 20,
+            schema: {
+                // 1. The response from read operation will return an object with
+                //      a total field and a data field. 
+                // 2. 'total' field will include how many items found in the query
+                //      and 'data' field will include the result (array of objects)
+                //      from the query.
+                total: 'total', // to understand better, take a look at the apiController file
+                data: "data",
+                model: model
+            },
+            aggregate: [
+                { field: "transaction_number",aggregate: "count" },
+                { field: "transaction_amount", aggregate: "sum" }
+            ]
+        });
+
+        $("#grid").kendoGrid({
+            dataSource: dataSource,
+            // Make sure the autoBind attribute is set to false otherwise,
+            // it will show a 'filter options' error.
+            autoBind: false,
+            pageable: {
+                pageSizes: true,
+                buttonCount: 5,
+                refresh: true
+            },
+            mobile: true,
+            sortable: true,
+            reorderable: true,
+            columnMenu: true,
+            height: 550,
+            toolbar: [
+                "create",
+                {
+                    template: `<span class='k-button' onclick=filterWindow()><i class='k-icon k-i-filter'></i>Filter</span>`
+                },
+                "excel",
+                {
+                    template: `<span class="k-spacer"></span>`
+                },
+                "search"
+            ],
+            excel: {
+                fileName: "List of expenses.xlsx",
+                proxyURL: "https://demos.telerik.com/kendo-ui/service/export",
+                filterable: true
+            },
+            // The following seach configuration should be used. This is also 
+            // important because, if you don't specify the search fields and you search
+            // for example 'hello' in the grid's search panel, then this 'hello' will be
+            // searched in all fields of the grid, including the fields with number type.
+            // Since 'hello' is a string and if this is searched in transaction_amount 
+            // field (which is a number field), then mongodb will throw an error. Becuase 
+            // Mongoose does not allow string searched in number field. In this case, if you look
+            // carefully, then you will notice that we have included string fields only. 
+            // No number, date or objectid fields are added in the search fields.
+            search: {
+                fields: [
+                    "transaction_number",
+                    "tenant.tenant_name",
+                    "property.property_name",
+                    "unit.unit_name",
+                    "ledger.ledger_name"
+                ]
+            },
+            noRecords: true,
+            messages: {
+                noRecords: "No data available on current page."
+            },
+            columns: column,
+            editable: "popup",
+            // The following edit event is fired when adding a record or editing an existing
+            // record. We need to use this incase we want to detect if its an edit or an add operation.
+            edit: function (e) {
+                // The following function hides columns with 'hideMe: true' attribute in the columnns.
+                gridHideMe(e);
+            }
+        });
+    };
+
+    // 1. Filter window. We will use the kendo window component to
+    //      show the filter. This is because the filter component
+    //      takes a lot of space. So we will keep the filter in the window
+    //      and keep the main body clean for the grid only.
+    function filterWindow() {
+        var configuration = {
+            id: 'filter_window', // You need to put the window component's id here
+            title: 'Filter Window', // You can change the title for the window
+            width: 720,
+            height: 400
+        };
+        // This kendoWindow function is created inside kendo layouts file
+        kendoWindow(configuration);
+    }
+
+    //Initialize filter 
+    function createFilter() {
+        $("#filter").kendoFilter({
+            dataSource: $("#grid").data('kendoGrid').dataSource,
+            applyButton: true,
+            fields: [
+                {
+                    name: "unit._id",
+                    label: "Unit Name",
+                    // 1. this _id type is a custom type. This is defined in 
+                    //      the operators section.
+                    type: "_id", 
+                    editorTemplate: unitNameFilterEditor
+                },
+                {
+                    name: "property._id",
+                    label: "Property Name",
+                    type: "_id",
+                    editorTemplate: propertyNameFilterEditor
+                },
+                {
+                    name: "tenant._id",
+                    label: "Tenant Name",
+                    type: "_id",
+                    editorTemplate: tenantNameFilterEditor
+                },
+                {
+                    name: "ledger._id",
+                    label: "Ledger Name",
+                    type: "_id",
+                    editorTemplate: ledgerNameFilterEditor
+                },
+                {
+                    name: "transaction_date",
+                    label: "Transaction Date",
+                    type: "date"
+                },
+                {
+                    name: "transaction_amount",
+                    label: "Transaction Amount",
+                    type: "number"
+                },
+                {
+                    name: "transaction_number",
+                    label: "Transaction Number",
+                    type: "string"
+                }
+            ],
+            operators: {
+                _id: {
+                    eq: {
+                        text: 'Is equal to',
+                        handler: 'eq'
+                    }
+                },
+                string: {
+                    contains: 'Contains',
+                    startsWith: 'Starts with',
+                    eq: 'Is equal to',
+                    isnull: "Is empty",
+                    isnotnull: "Is not empty"
+                },
+                number: {
+                    eq: 'Is equal to',
+                    gte: 'Greater or equal to',
+                    gt: 'Greater than',
+                    lte: 'Less or equal to',
+                    lt: 'Less than',
+                },
+                date: {
+                    gte: "Greater than or equal to",
+                    lt: "Less than",
+                    isnull: "Is empty",
+                    isnotnull: "Is not empty"
+                }
+            },
+            expression: {
+                logic: "and",
+                filters: filters
+            },
+        }).data("kendoFilter").applyFilter();
+    }
+
+    function parseFilter() {
+        let fields = $("#filter").data('kendoFilter').options.fields,
+        dataSource = $("#grid").data('kendoGrid').dataSource;
+
+        if ($("#grid").data('kendoGrid').dataSource.filter()) {
+            let filters = $("#grid").data('kendoGrid').dataSource.filter().filters,
+                query = [],
+                condition = {};
+            filters.forEach(item => {
+                let obj = {};
+                let idx = fields.findIndex(a=>a.name === item.field);
+                let type = idx > -1 ? fields[idx].type : 'string';
+                
+                if (item.operator === 'isnull') {
+                    obj[item.field] = null;
+                } else if (item.operator === 'isnotnull') {
+                    obj[item.field] = { $ne: null };
+                } else if (item.operator === 'eq') {
+                    obj[item.field] = item.value;
+                } else if (type === 'date'){
+                    obj[item.field] = {};
+                    obj[item.field][`$${item.operator}`] = kendoDateFormat(item.value, 'yyyy-MM-dd');
+                } else if (item.operator !== 'contains') {
+                    obj[item.field] = {};
+                    obj[item.field][`$${item.operator}`] = item.value;
+                } else {
+                    obj[item.field] = {};
+                    obj[item.field] = { $regex: item.value, $options: "$i" };
+                }
+                query.push(obj);
+            });
+            condition[`$${dataSource.filter().logic}`] = query;
+            return condition;
+        } else {
+            return {  }
+        }
+    }
+
+    function tenantNameEditor(container, options) {
+        let input = $(`<input id="tenant" name="tenant" style="width: 100%;" required />`);
+        input.appendTo(container)
+        input.kendoMultiColumnComboBox({
+            filter: "contains",
+            autoBind: false,
+            dataTextField: 'tenant_name',
+            dataValueField: '_id',
+            noDataTemplate: "No tenant found",
+            dataSource: new kendo.data.DataSource({
+                type: "json",
+                transport: {
+                    read: {
+                        url: "/api/tenant/get",
+                    }
+                },
+                schema: {
+                    model: {
+                        id: "_id",
+                        fields: {
+                            _id: { editable: false, nullable: true },
+                            tenant_name: { type: "string" },
+                            property: {
+                                type: 'object', defaultValue: {
+                                    _id: null, property_name: null
+                                }
+                            },
+                            unit: {
+                                type: 'object', defaultValue: {
+                                    _id: null, unit_name: null
+                                }
+                            },
+                        }
+                    }
+                }
+            }),
+            columns: [
+                { field: "tenant_name", title: "Tenant Name", width: 200 },
+                { field: "property.property_name", title: "Property Name", width: 150 },
+                { field: "unit.unit_name", title: "Unit Name", width: 120 },
+
+            ],
+            filter: "contains",
+            filterFields: ["tenant_name", "property.property_name", "unit.unit_name"],
+            select: function (e) {
+                options.model.set("property.property_name", e.dataItem.property.property_name);
+                options.model.set("property._id", e.dataItem.property._id);
+                options.model.set("unit.unit_name", e.dataItem.unit.unit_name);
+                options.model.set("unit._id", e.dataItem.unit._id);
+            }
+        });
+    }
+
+    function ledgerNameEditor(container, options) {
+        let input = $(`<input id="ledger" name="ledger" style="width: 100%;" required />`);
+        input.appendTo(container)
+        input.kendoDropDownList({
+            autoClose: false,
+            autoBind: false,
+            dataTextField: 'ledger_name',
+            dataValueField: '_id',
+            noDataTemplate: "No ledger category found",
+            dataSource: {
+                type: "json",
+                transport: {
+                    read: {
+                        url: "/api/ledger/query/get2",
+                        type: 'POST'
+                    },
+                    parameterMap: function (options, operation) {
+                        if (operation === "read") {
+                            return {
+                                models: kendo.stringify({
+                                    ledger_category: 'Expense'
+                                })
+                            };
+                        }
+                    },
+                }
+            }
+        });
+    }
+
+    function unitNameFilterEditor(container, options) {
+        let input = $(`<input data-bind="value: value" id="unit_name" name="unit_name" style="width: 180px;" required />`);
+        input.appendTo(container)
+        input.kendoDropDownList({
+            autoClose: false,
+            autoBind: false,
+            filter: "contains",
+            dataTextField: 'unit_name',
+            dataValueField: '_id',
+            noDataTemplate: "No unit found",
+            footerTemplate: 'Total number of <strong>#: instance.dataSource.total() #</strong> units found',
+            dataSource: {
+                type: "json",
+                transport: {
+                    read: {
+                        url: "/api/unit/get"
+                    }
+                }
+            }
+        });
+    }
+
+    function propertyNameFilterEditor(container, options) {
+        let input = $(`<input data-bind="value: value" id="property_name" name="property_name" style="width: 180px;" required />`);
+        input.appendTo(container)
+        input.kendoDropDownList({
+            autoClose: false,
+            autoBind: false,
+            filter: "contains",
+            dataTextField: 'property_name',
+            dataValueField: '_id',
+            noDataTemplate: "No property found",
+            footerTemplate: 'Total number of <strong>#: instance.dataSource.total() #</strong> properties found',
+            dataSource: {
+                type: "json",
+                transport: {
+                    read: {
+                        url: "/api/property/get"
+                    }
+                }
+            }
+        });
+    }
+
+    function tenantNameFilterEditor(container, options) {
+        let input = $(`<input data-bind="value: value" id="tenant_name" name="tenant_name" style="width: 180px;" required />`);
+        input.appendTo(container)
+        input.kendoDropDownList({
+            autoClose: false,
+            autoBind: false,
+            filter: "contains",
+            dataTextField: 'tenant_name',
+            dataValueField: '_id',
+            noDataTemplate: "No user role found",
+            footerTemplate: 'Total number of <strong>#: instance.dataSource.total() #</strong> tenants found',
+            dataSource: {
+                type: "json",
+                transport: {
+                    read: {
+                        url: "/api/tenant/get"
+                    }
+                }
+            }
+        });
+    }
+
+    function ledgerNameFilterEditor(container, options) {
+        let input = $(`<input data-bind="value: value" id="ledger_name" name="ledger_name" style="width: 180px;" required />`);
+        input.appendTo(container)
+        input.kendoDropDownList({
+            autoClose: false,
+            autoBind: false,
+            filter: "contains",
+            dataTextField: 'ledger_name',
+            dataValueField: '_id',
+            noDataTemplate: "No user role found",
+            footerTemplate: 'Total number of <strong>#: instance.dataSource.total() #</strong> ledgers found',
+            dataSource: {
+                type: "json",
+                transport: {
+                    read: {
+                        url: "/api/ledger/get"
+                    }
+                }
+            }
+        });
+    }
+</script>
